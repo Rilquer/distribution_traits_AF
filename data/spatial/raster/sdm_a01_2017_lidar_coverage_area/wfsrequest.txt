@@ -1,0 +1,1 @@
+https://www.paisagenslidar.cnptia.embrapa.br/geoserver/wfs?format_options=charset%3AUTF-8&typename=geonode%3Asdm_a01_2017_lidar_coverage_area&outputFormat=SHAPE-ZIP&version=1.0.0&service=WFS&request=GetFeature

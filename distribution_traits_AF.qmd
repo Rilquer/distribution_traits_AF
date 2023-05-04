@@ -1,0 +1,226 @@
+---
+title: "Distribution of Traits AF"
+author: "Rilquer Mascarenhas"
+format: html
+editor: visual
+---
+
+### Conceptual notes
+
+Steps that we wanna do:
+
+1.  Select the traits that correlate to climate
+2.  Those traits will be used to calculate functional diversity per community
+3.  Mapping that functional diversity per community
+
+> Random thoughts:
+>
+> 1.  There will be correlations of all traits with some climate.
+> 2.  Mapping will reflect that correlation
+
+### Gathering and organizing data
+
+A list of all birds in the Atlantic Forest and their traits will be retrieved from the [ATLANTIC Birds dataset](https://esajournals-onlinelibrary-wiley-com.ezproxy.gc.cuny.edu/doi/full/10.1002/ecy.2647#support-information-section). Traits will be based on average of the values in there for the species. Traits will be complemented with info from \[Avonet\]. Traits used will be:
+
+-   Body length
+
+-   Wing length
+
+-   Tarsus length
+
+-   Tail length
+
+-   Bill length, depth and width
+
+-   Trophic level
+
+-   Trophic niche
+
+-   Foraging stratum (??)
+
+-   Habitat - from Avonet (??)
+
+> Using the ATLANTIC list will be better than used an unpublished thesis. Additionally, it will be better than using a global trait data base, because this one is more focused on the Atlantic Forest. Then we complement with general info from Avonet.
+
+Reading data, summarizing and joining Avonet trait data:
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(taxize)
+af_data <- read_csv('data/ATLANTIC_DATASET/ATLANTIC_BIRD_TRAITS_Spp_Info.csv')
+order_data <- read_csv('data/ATLANTIC_DATASET/ATLANTIC_BIRD_TRAITS_completed_2018_11_d05.csv') %>% 
+  select(Order,Binomial) %>% distinct(Binomial,Order)
+
+af_data <- af_data %>% 
+  left_join(order_data) %>% 
+  filter(Order == 'Passeriformes') %>% 
+  select(Binomial,
+         Body_length.mm.median,
+         Wing_length.mm.median,
+         Tail_length.mm.median,
+         Tarsus_length.mm.median,
+         Bill_length.mm.median,
+         Bill_depth.mm.median,
+         Bill_width.mm.median)
+
+# Removing taxon with just genus name.
+af_data <- af_data %>% slice(-c(grep('sp\\.',af_data$Binomial)))
+
+# Taxize to check for taxonomy
+name_resolve <- gnr_resolve(af_data$Binomial, best_match_only = TRUE, canonical = TRUE)
+name_resolve[name_resolve$user_supplied_name != name_resolve$matched_name2, c("user_supplied_name", "matched_name2")]
+
+# P. pernambucensis is the only unmatched
+
+avonet <- read_csv('data/AVONET/avonet_birdtree.csv') %>%
+  select(Species3,Trophic.Level,Trophic.Niche) 
+
+not_spp <- af_data$Binomial[which(!(af_data$Binomial %in% avonet$Species3))]
+
+# Here, we are removing species that are in af_data but not in Avonet. This includes
+# P. pernambucensis, and probably other species that are recent split and changed
+# taxonomic name.
+# In the future, CHANGE THIS to first modify Avonet to match ATLANTIC.
+af_data <- af_data %>% left_join(avonet, by = c('Binomial' = 'Species3'),
+                                 unmatched = 'drop') %>%
+  filter(!(Binomial %in% not_spp))
+  
+```
+
+Retrieving info for `birdlife` polygons.
+
+> This code is run with all the polygons available from `birdlife`, to filter out the AF polygons based on `af_data`. The complete set of the `birdlife` polygons are outside this repo. This code saves the AF polygons within this repo at the end. This code can then be skipped after we have saved only the polygons we want in this repo.
+
+```{r}
+# Reading first list of polygons without full name
+pol_path <- '/Users/rilquermascarenhas/City University of New York/Elkin Tenorio Moreno - Shapefiles BirdLife 2020'
+polygons <- list.files(pol_path, pattern = '.shp$')
+
+# Finding the shapefile for each species
+polygon_file <- c()
+for (i in 1:nrow(af_data)) {
+  idc <- grep(gsub(' ','_',af_data$Binomial[i]),polygons, ignore.case = TRUE)
+  if (length(idc)!=0) {
+    polygon_file <- rbind(polygon_file,c(idc,polygons[idc]))
+  } else {
+    polygon_file <- rbind(polygon_file,c(NA,NA))
+  }
+}
+
+#Checking species that didn't match
+not_matched <- which(is.na(polygon_file[,1]))
+af_data$Binomial[not_matched]
+
+# Checking those names online and creating vector with BirdLife name
+new_names <- c('Asemospiza_fuliginosa','Thlypopsis_pyrrhocoma',NA,NA,NA,
+               'Castanozoster_thoracicus','Leistes_superciliaris',
+               'Cyanocorax_coeruleus','Pogonotriccus_eximius')
+
+for (i in 1:length(new_names)) {
+  if (!is.na(new_names[i])) {
+    n <- grep(new_names[i],polygons)
+    polygon_file[not_matched[i],1] <- n
+    polygon_file[not_matched[i],2] <- polygons[n]
+  } 
+}
+
+# Checking again which ones are still NA (should be three)
+not_matched <- which(is.na(polygon_file[,1]))
+
+# I decided to drop those that I couldn't find the polygon, which makes sense:
+# If birdlife does not have the polygons, then we don't want it.
+# Notice that altho I give above the names
+# Dropping those from af_data and polygons
+af_data <- af_data[-not_matched,]
+polygon_file <- polygon_file[-not_matched,]
+
+af_data <- af_data %>% mutate(polygon = polygon_file[,2])
+
+# Reading polygons and writing them in the repo
+library(rgdal)
+shapes <- vector('list',length = nrow(af_data))
+for (i in 1:nrow(af_data)) {
+  shapes[[i]] <- readOGR(paste0(pol_path,'/',af_data$polygon[i]))
+  writeOGR(shapes[[i]],
+           dsn = paste0('data/spatial/vector/birdlife_polygons/'),
+           layer = af_data$polygon[i],
+           driver = 'ESRI Shapefile',
+           overwrite_layer = TRUE)
+}
+rm(shapes)
+save.image('AF_macro.RData')
+```
+
+Creating matrix:
+
+```{r}
+library(sf)
+af_shapefile <- read_sf('data/spatial/vector/af_shapefile_lei/Lei_da_Mata_Atlantica_2006.shp' )
+ext <- st_bbox(af_shapefile)
+
+library(letsR)
+spp_mat <- lets.presab.birds('data/spatial/vector/birdlife_polygons/',
+                             xmn = ext[1], xmx = ext[2], ymn = ext[3],
+                             ymx = ext[4], resol = 0.041, remove.cells = FALSE,
+                             remove.sp = TRUE, show.matrix = FALSE,
+                             crs = '+proj=longlat +datum=WGS84 +no_defs', 
+                             crs.grid = '+proj=longlat +datum=WGS84 +no_defs',
+                             count = TRUE)
+
+save.image('AF_macro.RData')
+```
+
+### Calculating and visualizing patterns:
+
+Calculating functional Hill numbers and adding to site-by-spp matrix:
+
+```{r}
+
+```
+
+Rasterize site-by-spp matrix for hill number and mask by AF shapefile:
+
+```{r}
+
+```
+
+### Trait correlation using phylogenies
+
+Required packages:
+
+```{r}
+devtools::install_github('https://github.com/liamrevell/phytools')
+devtools::install_github('https://github.com/liamrevell/phytools')
+```
+
+```{r}
+library(tidyverse)
+
+morphodata <- read.csv('data/data_pcmorfo.csv', sep = ';')
+rownames(morphodata) <- morphodata[,1]
+tree <- read.tree(file='data/zheng2016_phy.txt')
+
+chk <- name.check(tree,morphodata)
+
+morphodata_1 <- subset(morphodata,!(species %in% chk$data_not_tree))
+
+newtree <- drop.tip(tree,chk$tree_not_data)
+
+chk2 <- name.check(newtree,morphodata_1)
+
+# Log transformation
+data2 <- morphodata_1[,3:24]
+data2 <- log10(data2)
+attach(data2)
+
+
+#Body-size correction
+
+HeadL <- data2$Head_length
+HeadW <- data2$Head_width
+HeadH <- data2$Head_height
+SVL <- data2$SVL
+
+HLcor <- phyl.resid(newtree, SVL, HeadL, method = 'BM')
+HLc <- HLcor$resid
+```

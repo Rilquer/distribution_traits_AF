@@ -1,0 +1,1 @@
+https://ferramentas.sibbr.gov.br/geoserver/SiBBr/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=SiBBr:PESM_NUCLEO_ITARITU_SANTA_VIRGINIAOK&outputFormat=SHAPE-ZIP
