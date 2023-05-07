@@ -42,11 +42,27 @@ A list of all birds in the Atlantic Forest and their traits will be retrieved fr
 
 > Using the ATLANTIC list will be better than used an unpublished thesis. Additionally, it will be better than using a global trait data base, because this one is more focused on the Atlantic Forest. Then we complement with general info from Avonet.
 
+Packages:
+
+```{r}
+library(tidyverse)
+library(taxize)
+library(raster)
+library(sf)
+library(rgdal)
+library(needs)
+library(ggsci)
+library(hillR)
+prioritize(dplyr)
+```
+
+> REDO CODE:
+>
+> The best way to proceed is to first get the birdlife polygons, and get everything that intersects with our AF shapefile. This way, we are getting our list of AF species from BirdLife polygons. Then, after that, we get trait data from ATLANTIC from Avonet. Also, get avonet from Birdlife (to match taxonomy)
+
 Reading data, summarizing and joining Avonet trait data:
 
 ```{r warning=FALSE, message=FALSE}
-library(tidyverse)
-library(taxize)
 af_data <- read_csv('data/ATLANTIC_DATASET/ATLANTIC_BIRD_TRAITS_Spp_Info.csv')
 order_data <- read_csv('data/ATLANTIC_DATASET/ATLANTIC_BIRD_TRAITS_completed_2018_11_d05.csv') %>% 
   select(Order,Binomial) %>% distinct(Binomial,Order)
@@ -84,14 +100,13 @@ not_spp <- af_data$Binomial[which(!(af_data$Binomial %in% avonet$Species3))]
 af_data <- af_data %>% left_join(avonet, by = c('Binomial' = 'Species3'),
                                  unmatched = 'drop') %>%
   filter(!(Binomial %in% not_spp))
-  
 ```
 
 Retrieving info for `birdlife` polygons.
 
 > This code is run with all the polygons available from `birdlife`, to filter out the AF polygons based on `af_data`. The complete set of the `birdlife` polygons are outside this repo. This code saves the AF polygons within this repo at the end. This code can then be skipped after we have saved only the polygons we want in this repo.
 
-```{r}
+```{r eval=FALSE}
 # Reading first list of polygons without full name
 pol_path <- '/Users/rilquermascarenhas/City University of New York/Elkin Tenorio Moreno - Shapefiles BirdLife 2020'
 polygons <- list.files(pol_path, pattern = '.shp$')
@@ -134,10 +149,9 @@ not_matched <- which(is.na(polygon_file[,1]))
 af_data <- af_data[-not_matched,]
 polygon_file <- polygon_file[-not_matched,]
 
-af_data <- af_data %>% mutate(polygon = polygon_file[,2])
+af_data <- af_data %>% mutate(polygon = polygon_file[,2]) %>% as.tibble()
 
 # Reading polygons and writing them in the repo
-library(rgdal)
 shapes <- vector('list',length = nrow(af_data))
 for (i in 1:nrow(af_data)) {
   shapes[[i]] <- readOGR(paste0(pol_path,'/',af_data$polygon[i]))
@@ -158,31 +172,121 @@ library(sf)
 af_shapefile <- read_sf('data/spatial/vector/af_shapefile_lei/Lei_da_Mata_Atlantica_2006.shp' )
 ext <- st_bbox(af_shapefile)
 
-library(letsR)
-spp_mat <- lets.presab.birds('data/spatial/vector/birdlife_polygons/',
-                             xmn = ext[1], xmx = ext[2], ymn = ext[3],
-                             ymx = ext[4], resol = 0.041, remove.cells = FALSE,
-                             remove.sp = TRUE, show.matrix = FALSE,
-                             crs = '+proj=longlat +datum=WGS84 +no_defs', 
-                             crs.grid = '+proj=longlat +datum=WGS84 +no_defs',
-                             count = TRUE)
+
+r <- raster(xmn = ext[1], xmx = ext[2], ymn = ext[3], ymx = ext[4],
+            crs = '+proj=longlat +datum=WGS84 +no_defs')
+res(r) <- 0.041
+values(r) <- 1
+spp_stack <- stack()
+for (i in 1:nrow(af_data)) {
+  message(i,'. Reading polygon for ',af_data$Binomial[i])
+  shape <- read_sf(paste0('data/spatial/vector/birdlife_polygons/',af_data$polygon[i],'.shp'))
+  spp_r <- mask(r,as_Spatial(shape)) # Masking out where the species is absent
+  spp_r[is.na(spp_r)] <- 0 # Changing absence to 0
+  spp_r <- mask(spp_r,as_Spatial(af_shapefile)) # Masking to AF, to get matriz only for that
+  names(spp_r) <- af_data$Binomial[i] # Adding species name
+  spp_stack <- stack(spp_stack,spp_r) # Adding to stack
+  message('')
+}
+
+spp_mat <- rasterToPoints(spp_stack) %>% as_tibble()
+colnames(spp_mat) <- gsub('\\.',' ',colnames(spp_mat))
 
 save.image('AF_macro.RData')
 ```
 
+Checking `spp_mat`:
+
+```{r}
+
+```
+
 ### Calculating and visualizing patterns:
+
+Calculating and plotting richness:
+
+```{r}
+spp_mat <- spp_mat %>% rowwise() %>% mutate(richness = sum(c_across(3:ncol(spp_mat)))) %>%
+  ungroup() %>% filter(richness > 80)
+
+richness <- rasterFromXYZ(spp_mat %>% select(x,y,richness))
+
+ggplot()+
+  geom_tile(data = spp_mat, aes(x=x,y=y,fill=richness))+
+  scale_fill_gradient2(low = '#2b83ba', mid = '#fffebd', high = '#d7191c',
+                       midpoint = 175)+
+  coord_sf(xlim = c(ext[1],ext[2]), ylim = c(ext[3],ext[4]),
+           expand = FALSE)
+```
 
 Calculating functional Hill numbers and adding to site-by-spp matrix:
 
 ```{r}
+# Checking species absent in all and dropping them
+absent_spp <- c()
+for (i in 3:(ncol(spp_mat)-1)) {
+  vec <- as.vector(spp_mat[,i])[[1]]
+  uni <- unique(vec)
+  if (length(uni)<2) {
+    if (uni[1]==0) {
+      absent_spp <- c(absent_spp,colnames(spp_mat)[i])
+    }
+  }
+}
+spp_mat <- spp_mat %>% select(!all_of(absent_spp))
 
+traits <- af_data %>% filter(!(Binomial %in% absent_spp)) %>% select(-polygon) %>% as.data.frame()
+  
+rownames(traits) <- traits$Binomial
+traits <- traits %>% select(-Binomial)
+comm <- spp_mat %>% select(-c(x,y,richness))
+func_q0 <- hill_func(comm,traits, q = 0)
+# No sense to make higher
+
+save.image('AF_macro.RData')
 ```
 
-Rasterize site-by-spp matrix for hill number and mask by AF shapefile:
+> How can I get abundance? Two options:
+>
+> 1\) eBird lists - in this case, I would have to get localities across the AF, filter out based a minimum number of lists, and calculate frequency of species in the lists. I could throw those values in space and interpolate.
+>
+> 2\) the relative proportion of specimens measured in the Atlantic dataset. Here, I am assuming that this value is a proxy to how abundance the species is in the Atlantic Forest.
+
+Adding to `spp_mat` and plotting:
 
 ```{r}
-
+spp_mat <- spp_mat %>% mutate(D_func = func_q0[3,],
+                              FD = func_q0[5,])
+ggplot()+
+  geom_tile(data = spp_mat, aes(x=x,y=y,fill=FD))+
+  scale_fill_gradient2(low = '#2b83ba', mid = '#fffebd', high = '#d7191c',
+                       midpoint = max(spp_mat$FD)/2)+
+  coord_sf(xlim = c(ext[1],ext[2]), ylim = c(ext[3],ext[4]),
+           expand = FALSE)
 ```
+
+> Functional diversity is similar to richness. Nothing new here. Would abundance bring something different?
+
+Correlating to enviroment:
+
+```{r}
+climstack <- stack(list.files('data/spatial/raster/climdata/01_cur_chelsa_V1_2B_r2_5m/',
+                             pattern = '.tif$',full.names = T))
+climdata <- extract(climstack,spp_mat[,1:2]) %>% as_tibble() %>% 
+  mutate(richness = spp_mat$richness,
+         D_func = spp_mat$D_func,
+         FD = spp_mat$FD)
+
+cor_mat <- corrr::correlate(climdata, method = 'spearman') %>% 
+  filter(term %in% c('richness','D_func','FD')) %>% 
+  dplyr::select(-c('richness','D_func','FD')) %>%
+  pivot_longer(cols = starts_with('bio'),
+               names_to = 'climate')
+sig_cor <- cor_mat %>% filter((value < -0.5) | (value > 0.5))
+save.image('AF_macro.RData')
+```
+
+> Some correlation with Mean Temperature of Driest Quarter (Bio9) and Precipitation of Warmest Quarter (Bio18).
 
 ### Trait correlation using phylogenies
 
